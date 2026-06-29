@@ -29,17 +29,32 @@ HEADS = {                                   # head -> (feature group, threshold 
 }
 
 
-def _base_estimator(cfg: ExoConfig):
+def _base_estimator(cfg: ExoConfig, params: dict = None):
     cw = "balanced" if cfg.balanced_weights else None
+    params = params or {}
     try:
         from lightgbm import LGBMClassifier
-        return LGBMClassifier(n_estimators=cfg.n_estimators, learning_rate=cfg.learning_rate,
-                              class_weight=cw, random_state=cfg.seed, verbose=-1)
+        kw = dict(n_estimators=cfg.n_estimators, learning_rate=cfg.learning_rate,
+                  class_weight=cw, random_state=cfg.seed, verbose=-1)
+        kw.update(params)                                  # tuned params override defaults (3a)
+        return LGBMClassifier(**kw)
     except Exception:
         from sklearn.ensemble import HistGradientBoostingClassifier
         return HistGradientBoostingClassifier(max_iter=cfg.n_estimators,
                                               learning_rate=cfg.learning_rate,
                                               class_weight=cw, random_state=cfg.seed)
+
+
+# LightGBM search space — small, tabular-physics-appropriate. Regularization + capacity knobs that
+# matter at ~1.8k rows; learning_rate/n_estimators left to cfg so calibration stays comparable.
+HP_SPACE = {
+    "num_leaves":        [15, 31, 63, 127],
+    "max_depth":         [-1, 4, 6, 8, 12],
+    "min_child_samples": [5, 10, 20, 40],
+    "subsample":         [0.7, 0.85, 1.0],
+    "colsample_bytree":  [0.7, 0.85, 1.0],
+    "reg_lambda":        [0.0, 1.0, 5.0],
+}
 
 
 def _logtf(X, heavy_idx):
@@ -60,6 +75,7 @@ class Cascade:
         self.cov = {}              # folder -> LedoitWolf
         self.ood_thr = None
         self.metrics = {}
+        self.hp = {}               # head -> tuned LightGBM params (3a); empty = library defaults
         self.model_version = None
 
     def _group_feats(self, group):
@@ -72,6 +88,8 @@ class Cascade:
         self.heavy_idx = [self.all_feats.index(c) for c in HEAVY_FEATURES]
         self.head_feats = {name: self._group_feats(g) for name, (g, _) in HEADS.items()}
         self.ood_medians = table[self.all_feats].median()
+        if cfg.hp_search and not self.hp:
+            self.tune_hyperparams(table)        # tune on the (improved) features before fitting heads
 
         gss = GroupShuffleSplit(n_splits=1, test_size=cfg.test_size, random_state=cfg.seed)
         tr_i, te_i = next(gss.split(table, groups=table["kic"].values))
@@ -84,14 +102,14 @@ class Cascade:
             clf = self._fit_head(tr, feats, name)
             p = clf.predict_proba(te[feats].values)[:, 1]
             y = te[name].values
-            self.metrics[name] = {
+            self.metrics.setdefault(name, {}).update({       # update, not replace: keep hp_cv_ap (3a)
                 "n_pos": int(table[name].sum()),
                 "pr_auc": round(float(average_precision_score(y, p)), 3),
                 "recall_at_thr": round(float(recall_score(y, (p >= thr).astype(int),
                                                           zero_division=0)), 3),
                 "brier": round(float(brier_score_loss(y, p)), 3),
                 "threshold": thr,
-            }
+            })
             self.heads[name] = self._fit_head(table, feats, name)   # deploy: refit on all data
 
         self._fit_ood(table)
@@ -100,11 +118,37 @@ class Cascade:
         return self
 
     def _fit_head(self, frame, feats, name):
-        est = _base_estimator(self.cfg)                        # gradient-boosted trees handle NaN natively
+        est = _base_estimator(self.cfg, self.hp.get(name))     # gradient-boosted trees handle NaN natively
         if self.cfg.calibrate:
             est = CalibratedClassifierCV(est, method="isotonic", cv=3)
         est.fit(frame[feats].values, frame[name].values)
         return est
+
+    def tune_hyperparams(self, table: pd.DataFrame, n_iter: int = 25):
+        """Per-head group-aware RandomizedSearchCV over HP_SPACE, scoring average-precision (PR-AUC) —
+        the metric that matters under class imbalance. Tunes the RAW estimator (calibration wraps the
+        winner afterward). Stores best params in self.hp so _fit_head picks them up. Run AFTER the
+        feature/centroid improvements so the search optimizes on the richer inputs (3a synergy)."""
+        from sklearn.model_selection import RandomizedSearchCV, GroupKFold, cross_val_score
+        groups = table["kic"].values
+        cv = GroupKFold(n_splits=3)
+        for name, (group, _) in HEADS.items():
+            feats = self.head_feats[name]
+            X, y = table[feats].values, table[name].values
+            # default-params CV score is the bar the search must clear
+            base_ap = float(np.mean(cross_val_score(_base_estimator(self.cfg), X, y, groups=groups,
+                                                     cv=cv, scoring="average_precision")))
+            search = RandomizedSearchCV(
+                _base_estimator(self.cfg), HP_SPACE, n_iter=n_iter, scoring="average_precision",
+                cv=cv, random_state=self.cfg.seed, n_jobs=self.cfg.n_jobs, error_score=0.0)
+            search.fit(X, y, groups=groups)
+            # only adopt tuned params if they actually beat the default — HP can help or no-op, never hurt
+            if search.best_score_ > base_ap:
+                self.hp[name] = {k: search.best_params_[k] for k in HP_SPACE}
+                self.metrics.setdefault(name, {})["hp_cv_ap"] = round(float(search.best_score_), 3)
+            else:
+                self.metrics.setdefault(name, {})["hp_cv_ap"] = f"default ({base_ap:.3f} >= {search.best_score_:.3f})"
+        return self.hp
 
     def _impute(self, X, medians):
         X = np.atleast_2d(np.asarray(X, float)).copy()
@@ -245,8 +289,11 @@ if __name__ == "__main__":
             depth_ppm=rng.normal(3000, 300),
             duration_hr=rng.normal(8 if T else 4, 0.5),               # transit -> longer
             odd_even_diff=abs(rng.normal(0, .02)),
+            odd_even_sig=abs(rng.normal(8 if E else 0.5, 1)),         # EB -> significant odd-even
             secondary_depth=abs(rng.normal(800 if E else 0, 50)),     # EB -> secondary eclipse
-            trap_shape=rng.beta(2, 6), snr=rng.normal(30, 3), sde=rng.normal(15, 2),
+            secondary_snr=rng.normal(10 if E else 0, 1.5),           # EB -> significant secondary
+            trap_shape=rng.beta(2, 6), ingress_frac=rng.beta(2, 6),
+            snr=rng.normal(30, 3), sde=rng.normal(15, 2),
             ls_power=rng.normal(0.9 if R else 0.1, .03),              # rotation -> LS power
             acf_peak=rng.normal(0.9 if R else 0.1, .03),
             rot_amplitude=rng.normal(0.02 if R else 0.002, .001),

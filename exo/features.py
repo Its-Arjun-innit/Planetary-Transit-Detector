@@ -48,14 +48,26 @@ def _bls_dip(time, flux, cfg: ExoConfig) -> dict:
     ph = ((time - t0) / P) % 1.0
     half = dur / P / 2
     in_tr = (ph < half) | (ph > 1 - half)
-    sigma = np.std(flux[~in_tr]) if (~in_tr).any() else np.std(flux)
+    oot = flux[~in_tr]
+    sigma = np.std(oot) if len(oot) else np.std(flux)
     snr = float(depth / (sigma / np.sqrt(max(1, in_tr.sum())))) if sigma > 0 else 0.0
 
     cyc = np.floor((time - t0) / P).astype(int)
     odd, even = flux[in_tr & (cyc % 2 == 1)], flux[in_tr & (cyc % 2 == 0)]
     odd_even = float(abs(np.median(odd) - np.median(even))) if len(odd) and len(even) else 0.0
+    # odd_even_sig: that depth difference in units of its own error (EB tell). A raw diff of X is
+    # meaningless without the scatter; significance is what actually separates EBs from noise.
+    oe_sig = 0.0
+    if len(odd) > 1 and len(even) > 1:
+        se = np.sqrt(np.var(odd) / len(odd) + np.var(even) / len(even))
+        oe_sig = float(abs(np.median(odd) - np.median(even)) / se) if se > 0 else 0.0
+
     sec = flux[(ph > 0.5 - half) & (ph < 0.5 + half)]
     sec_depth = float(max(0.0, (1 - np.median(sec)) * 1e6)) if len(sec) else 0.0
+    # secondary_snr: secondary-eclipse depth in units of the out-of-eclipse noise. A real secondary
+    # (EB) stands above the noise; a depth value alone can't tell a true secondary from scatter.
+    sec_snr = float((1 - np.median(sec)) / (sigma / np.sqrt(max(1, len(sec))))) \
+        if len(sec) and sigma > 0 else 0.0
 
     # trap_shape: 0 = flat-bottomed box (planet/U), ->1 = pointy (grazing EB/V).
     # ponytail: proxy = how much shallower the median in-transit point is than the deepest.
@@ -66,9 +78,17 @@ def _bls_dip(time, flux, cfg: ExoConfig) -> dict:
         dmid = 1 - float(np.median(intr))
         if dmin > 0:
             trap = float(np.clip(1 - dmid / dmin, 0, 1))
+    # ingress_frac: fraction of the dip spent in ingress+egress (the sloped walls) vs the flat floor.
+    # Planet (sharp walls) -> small; grazing EB (V-shape, all slope) -> large. Complements trap_shape
+    # with a phase-resolved view. ponytail: floor = points within 25% of full depth of the deepest.
+    ingress_frac = 0.0
+    if len(intr) and dmin > 0:
+        on_floor = (1 - intr) >= 0.75 * dmin
+        ingress_frac = float(1 - on_floor.sum() / len(intr))
 
     return dict(depth_ppm=depth * 1e6, duration_hr=dur * 24, odd_even_diff=odd_even,
-                secondary_depth=sec_depth, trap_shape=trap, snr=snr, sde=sde,
+                odd_even_sig=oe_sig, secondary_depth=sec_depth, secondary_snr=sec_snr,
+                trap_shape=trap, ingress_frac=ingress_frac, snr=snr, sde=sde,
                 period=P, t0=t0, duration_d=dur)
 
 

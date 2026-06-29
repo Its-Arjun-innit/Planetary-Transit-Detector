@@ -26,6 +26,7 @@ PIX_DIR = r"D:\Codes\ISRO_Hackathon\exo\pixels"
 PIX_INDEX = os.path.join(PIX_DIR, "_index.csv")
 PIX_OUT   = os.path.join(PIX_DIR, "pixel_features.csv")
 STELLAR_CACHE = os.path.join(PIX_DIR, "_stellar.csv")
+EPHEM_CACHE   = os.path.join(PIX_DIR, "_koi_ephem.csv")
 WORKERS = 5
 
 G_SI, MSUN, RSUN, RHO_SUN = 6.674e-11, 1.989e30, 6.957e8, 1408.0
@@ -99,6 +100,41 @@ def fetch_stellar():
     return t.set_index("kic")
 
 
+def fetch_koi_ephem():
+    """KOI ephemerides (period, epoch, duration) from the cumulative table, keyed by KIC.
+    koi_time0bk is BKJD — the SAME time system as the Kepler TPF/LC arrays — so it folds directly.
+    A KIC can host several KOIs (multi-planet); we keep them all and pick the one matching the
+    dip we measured at fold time (1a). Returns {kic: [(period, t0_bkjd, dur_d), ...]}."""
+    if os.path.exists(EPHEM_CACHE):
+        e = pd.read_csv(EPHEM_CACHE)
+    else:
+        base = "https://exoplanetarchive.ipac.caltech.edu/TAP/sync?query="
+        q = ("select kepid,koi_period,koi_time0bk,koi_duration from cumulative "
+             "where koi_period is not null")
+        e = pd.read_csv(base + q.replace(" ", "+") + "&format=csv")
+        os.makedirs(PIX_DIR, exist_ok=True)
+        e.to_csv(EPHEM_CACHE, index=False)
+    out = {}
+    for k, p, t0, dur_hr in zip(e.kepid.astype(int), e.koi_period, e.koi_time0bk, e.koi_duration):
+        if np.isfinite([p, t0]).all() and p > 0:
+            out.setdefault(int(k), []).append((float(p), float(t0), float(dur_hr) / 24.0
+                                               if np.isfinite(dur_hr) else np.nan))
+    return out
+
+
+def _choose_ephem(kic, bls_period, bls_t0, bls_dur_d, ephem):
+    """Pick the KOI ephemeris for THIS dip: the KOI whose period best matches the BLS-found period
+    (handles multi-KOI hosts). Falls back to the BLS ephemeris if no KOI is within 5% — so EBs and
+    rotators (no KOI) keep their BLS fold. This is the fix that stops centroiding on a wrong period."""
+    cands = ephem.get(int(kic)) if ephem else None
+    if not cands:
+        return bls_period, bls_t0, bls_dur_d
+    p, t0, dur = min(cands, key=lambda c: abs(c[0] - bls_period) / bls_period)
+    if abs(p - bls_period) / bls_period > 0.05:                 # BLS likely locked a different signal
+        return bls_period, bls_t0, bls_dur_d
+    return p, t0, (dur if np.isfinite(dur) and dur > 0 else bls_dur_d)
+
+
 def _clear_cache(kic):
     """Evict any corrupt cached files for this KIC. The original 5-worker build raced the
     shared lightkurve cache and left partial files that fail type-detection on every re-read;
@@ -112,8 +148,11 @@ def _clear_cache(kic):
             pass
 
 
-def _one(kic, period, t0, dur_d, retries=2, clear_cache=False):
+def _one(kic, period, t0, dur_d, retries=2, clear_cache=False, ephem=None, max_q=4):
+    """Centroid for one star. Folds on the true KOI ephemeris when available (1a) and averages the
+    difference-image centroid over up to max_q quarters to beat the ~0.4px noise floor (1b)."""
     import lightkurve as lk
+    p, e0, dur = _choose_ephem(kic, period, t0, dur_d, ephem)
     last = "err"
     for attempt in range(retries):
         try:
@@ -122,11 +161,23 @@ def _one(kic, period, t0, dur_d, retries=2, clear_cache=False):
             sr = lk.search_targetpixelfile(f"KIC {kic}", mission="Kepler", cadence="long")
             if len(sr) == 0:
                 return {"kic": kic, "status": "no data"}
-            tpf = sr[0].download()
-            cs = centroid_shift_from_tpf(tpf, period, t0, dur_d)
-            crowd = tpf.hdu[1].header.get("CROWDSAP", np.nan)
-            contratio = float(1 - crowd) if crowd is not None and np.isfinite(crowd) else np.nan
-            return {"kic": kic, "centroid_shift": cs, "contratio": contratio, "status": "ok"}
+            shifts, crowds = [], []
+            for q in range(min(max_q, len(sr))):            # average over several quarters
+                try:
+                    tpf = sr[q].download()
+                except Exception:
+                    continue
+                cs = centroid_shift_from_tpf(tpf, p, e0, dur)
+                if np.isfinite(cs):
+                    shifts.append(cs)
+                crowd = tpf.hdu[1].header.get("CROWDSAP", np.nan)
+                if crowd is not None and np.isfinite(crowd):
+                    crowds.append(1 - crowd)
+            if not shifts:
+                return {"kic": kic, "status": "err NoCentroid"}
+            return {"kic": kic, "centroid_shift": float(np.median(shifts)),
+                    "contratio": float(np.median(crowds)) if crowds else np.nan,
+                    "n_quarters": len(shifts), "status": "ok"}
         except Exception as e:
             last = f"err {type(e).__name__}"
             time.sleep(2 * (attempt + 1))                   # backoff: most failures are transient MAST throttling
@@ -141,6 +192,7 @@ def topup_pixels(cfg: ExoConfig = None, workers: int = 3):
     idx = pd.read_csv(PIX_INDEX)
     feats = pd.read_csv(cfg.feature_cache).set_index("kic")
     failed = idx[idx["status"].str.startswith("err", na=False)]["kic"].astype(int).tolist()
+    ephem = fetch_koi_ephem()
     _say(f"\npixel topup: retrying {len(failed)} failed KICs, {workers} workers")
     rows = {int(r["kic"]): r.to_dict() for _, r in idx.iterrows()}   # kic -> latest result
     t0 = time.time()
@@ -151,7 +203,8 @@ def topup_pixels(cfg: ExoConfig = None, workers: int = 3):
                 r = feats.loc[k]
                 rr = r.iloc[0] if isinstance(r, pd.DataFrame) else r
                 futs[ex.submit(_one, k, float(rr["period"]), float(rr["t0"]),
-                               float(rr["duration_d"]), 4, True)] = k   # clear_cache=True
+                               float(rr["duration_d"]), 4, True,
+                               ephem=ephem, max_q=cfg.max_quarters)] = k   # clear_cache=True
         for i, fut in enumerate(as_completed(futs), 1):
             res = fut.result()
             if res["status"] == "ok":
@@ -174,14 +227,34 @@ def build_pixel_table(cfg: ExoConfig = None):
     feats = pd.read_csv(cfg.feature_cache)
     need = feats[["kic", "period", "t0", "duration_d"]].dropna()
 
-    done = set(pd.read_csv(PIX_INDEX)["kic"].astype(int)) if os.path.exists(PIX_INDEX) else set()
-    jobs = [r for r in need.itertuples(index=False) if int(r.kic) not in done]
-    _say(f"\npixel build: {len(jobs)} to do ({len(done)} cached), {WORKERS} workers")
+    ephem = fetch_koi_ephem()
+    nq = {}                                      # kic -> quarters already averaged (new-path rows)
+    done = set()
+    if os.path.exists(PIX_INDEX):
+        idx0 = pd.read_csv(PIX_INDEX)
+        done = set(idx0["kic"].astype(int))
+        if "n_quarters" in idx0:
+            for k, q in zip(idx0["kic"].astype(int), idx0["n_quarters"]):
+                if np.isfinite(q):
+                    nq[k] = max(nq.get(k, 0), int(q))
+
+    def needs(kic):
+        kic = int(kic)
+        if kic not in done:              return True             # never attempted
+        if kic in ephem and kic not in nq:  return True          # old BLS row, KOI-bearing -> ephemeris fix (1a)
+        if kic in nq and nq[kic] < cfg.max_quarters and kic in ephem:
+            return True                  # extend a KOI star to more quarters (1b) when max_quarters grew
+        return False
+
+    jobs = [r for r in need.itertuples(index=False) if needs(r.kic)]
+    _say(f"\npixel build: {len(jobs)} to do ({len(done)} in index, {len(nq)} new-path), "
+         f"{WORKERS} workers, {len(ephem)} KOI ephemerides, up to {cfg.max_quarters} quarters")
 
     rows = pd.read_csv(PIX_INDEX).to_dict("records") if os.path.exists(PIX_INDEX) else []
     t0 = time.time()
     with ThreadPoolExecutor(max_workers=WORKERS) as ex:
-        futs = {ex.submit(_one, int(r.kic), float(r.period), float(r.t0), float(r.duration_d)): r
+        futs = {ex.submit(_one, int(r.kic), float(r.period), float(r.t0), float(r.duration_d),
+                          ephem=ephem, max_q=cfg.max_quarters): r
                 for r in jobs}
         for i, fut in enumerate(as_completed(futs), 1):
             rows.append(fut.result())

@@ -12,15 +12,16 @@ import hashlib, json
 # rho_consistency, contratio) are deliberately ABSENT — they need TPFs this dataset
 # doesn't have, and they're the only real false-positive-blend discriminators.
 # That's a dataset task, not a median-filled column. See features.py.
-DIP_FEATURES  = ["depth_ppm", "duration_hr", "odd_even_diff", "secondary_depth",
-                 "trap_shape", "snr", "sde"]
+DIP_FEATURES  = ["depth_ppm", "duration_hr", "odd_even_diff", "odd_even_sig",
+                 "secondary_depth", "secondary_snr", "trap_shape", "ingress_frac",
+                 "snr", "sde"]
 SPOT_FEATURES = ["ls_power", "acf_peak", "rot_amplitude"]
 # pixel-channel features (built by pixels.py from TPFs). Only used when cfg.use_pixels.
 PIXEL_FEATURES = ["centroid_shift", "rho_consistency", "contratio"]
 ALL_FEATURES  = DIP_FEATURES + SPOT_FEATURES   # light-curve-only default (use *_features(cfg) below)
 # heavy-tailed features get log1p before the OOD distance so a deep-but-real transit
 # isn't a geometric outlier (handoff §2).
-HEAVY_FEATURES = ["depth_ppm", "secondary_depth", "snr", "sde"]
+HEAVY_FEATURES = ["depth_ppm", "secondary_depth", "secondary_snr", "snr", "sde"]
 
 
 @dataclass
@@ -45,12 +46,17 @@ class ExoConfig:
     bls_n_periods: int = 5000
     bls_durations: tuple = (0.05, 0.1, 0.15, 0.2, 0.3)   # days
 
+    # ---- pixel channel (Stage 0, TPF) ----
+    max_quarters: int = 4              # difference-image centroid averaged over up to N quarters (1b)
+                                       # ponytail: 4 halves the ~0.4px noise floor; more = diminishing, more download
+
     # ---- heads (Stage 1) ----
     n_estimators: int = 400            # HistGBT max_iter / LightGBM n_estimators
     learning_rate: float = 0.1
     calibrate: bool = True             # isotonic calibration of each head's probability
     balanced_weights: bool = True
     use_pixels: bool = False           # add TPF features (centroid_shift, rho, contratio) to dip heads
+    hp_search: bool = False            # tune LightGBM params per head (RandomizedSearchCV) before fitting (3a)
 
     # ---- decision thresholds (Stage 4) — recall-first on transit ----
     thr_transit: float = 0.30          # lower than 0.5: missing a planet costs more than a review
