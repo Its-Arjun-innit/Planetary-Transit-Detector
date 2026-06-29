@@ -45,15 +45,18 @@ def _base_estimator(cfg: ExoConfig, params: dict = None):
                                               class_weight=cw, random_state=cfg.seed)
 
 
-# LightGBM search space — small, tabular-physics-appropriate. Regularization + capacity knobs that
-# matter at ~1.8k rows; learning_rate/n_estimators left to cfg so calibration stays comparable.
+# LightGBM search space — tabular-physics-appropriate. Capacity + regularization + the learning
+# schedule (n_estimators/learning_rate), since compute is available to search it properly.
 HP_SPACE = {
+    "n_estimators":      [200, 400, 600, 900],
+    "learning_rate":     [0.02, 0.05, 0.1],
     "num_leaves":        [15, 31, 63, 127],
     "max_depth":         [-1, 4, 6, 8, 12],
     "min_child_samples": [5, 10, 20, 40],
     "subsample":         [0.7, 0.85, 1.0],
     "colsample_bytree":  [0.7, 0.85, 1.0],
     "reg_lambda":        [0.0, 1.0, 5.0],
+    "reg_alpha":         [0.0, 1.0, 5.0],
 }
 
 
@@ -124,7 +127,7 @@ class Cascade:
         est.fit(frame[feats].values, frame[name].values)
         return est
 
-    def tune_hyperparams(self, table: pd.DataFrame, n_iter: int = 25):
+    def tune_hyperparams(self, table: pd.DataFrame, n_iter: int = 60):
         """Per-head group-aware RandomizedSearchCV over HP_SPACE, scoring average-precision (PR-AUC) —
         the metric that matters under class imbalance. Tunes the RAW estimator (calibration wraps the
         winner afterward). Stores best params in self.hp so _fit_head picks them up. Run AFTER the

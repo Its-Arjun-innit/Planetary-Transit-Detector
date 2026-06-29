@@ -47,8 +47,8 @@ class ExoConfig:
     bls_durations: tuple = (0.05, 0.1, 0.15, 0.2, 0.3)   # days
 
     # ---- pixel channel (Stage 0, TPF) ----
-    max_quarters: int = 4              # difference-image centroid averaged over up to N quarters (1b)
-                                       # ponytail: 4 halves the ~0.4px noise floor; more = diminishing, more download
+    max_quarters: int = 8              # difference-image centroid averaged over up to N quarters (1b)
+                                       # ponytail: noise ~1/sqrt(N); 8 -> ~65% reduction, past that diminishing
 
     # ---- heads (Stage 1) ----
     n_estimators: int = 400            # HistGBT max_iter / LightGBM n_estimators
