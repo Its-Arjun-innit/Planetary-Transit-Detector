@@ -1,12 +1,12 @@
 # Data & model artifacts (large, regenerable — not source)
 dataset/
-exo/models/
+exo/models/*.joblib
+!exo/models/latest.joblib
 exo/pixels/
-exo/*.csv
+exo/features_real*.csv
 exo/predictions.jsonl
 transit_lightcurves.xlsx
 *.parquet
-*.joblib
 
 # Python
 __pycache__/

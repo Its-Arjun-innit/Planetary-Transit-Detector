@@ -6,7 +6,9 @@ hardcoded anywhere else in the package.
 """
 from __future__ import annotations
 from dataclasses import dataclass, field, asdict
-import hashlib, json
+import hashlib, json, os
+
+_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))    # project root
 
 # Feature groups (fixed schema, not knobs). Pixel-channel features (centroid_shift,
 # rho_consistency, contratio) are deliberately ABSENT — they need TPFs this dataset
@@ -27,10 +29,10 @@ HEAVY_FEATURES = ["depth_ppm", "secondary_depth", "secondary_snr", "snr", "sde"]
 @dataclass
 class ExoConfig:
     # ---- data ----
-    dataset_root: str = r"D:\Codes\ISRO_Hackathon\dataset"
-    feature_cache: str = r"D:\Codes\ISRO_Hackathon\exo\features_real.csv"
-    model_dir: str = r"D:\Codes\ISRO_Hackathon\exo\models"
-    log_path: str = r"D:\Codes\ISRO_Hackathon\exo\predictions.jsonl"
+    dataset_root: str = os.path.join(_ROOT, "dataset")
+    feature_cache: str = os.path.join(_ROOT, "exo", "features_real.csv")
+    model_dir: str = os.path.join(_ROOT, "exo", "models")
+    log_path: str = os.path.join(_ROOT, "exo", "predictions.jsonl")
 
     # ---- detrend / peel (Stage 0) ----
     flatten_window: int = 401          # long-cadence points (~8 d) — removes rotation, keeps transits

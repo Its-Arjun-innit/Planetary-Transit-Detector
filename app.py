@@ -81,9 +81,13 @@ def binned_median(phase, flux, nbins=80):
 with st.sidebar:
     st.title("Exo Cascade")
 
+    latest = os.path.join(CFG.model_dir, "latest.joblib")
+    if not os.path.exists(latest):
+        st.error(f"No trained model at `{latest}`. Run `python -m exo train` first, "
+                 "or commit `exo/models/latest.joblib` to the deploy repo.")
+        st.stop()
     models = sorted(glob.glob(os.path.join(CFG.model_dir, "cascade_*.joblib")))
     labels = [os.path.basename(m) for m in models]
-    latest = os.path.join(CFG.model_dir, "latest.joblib")
     pick = st.selectbox("Model", ["latest.joblib"] + labels)
     model = get_model(latest if pick == "latest.joblib" else os.path.join(CFG.model_dir, pick))
     st.caption(f"version `{model.model_version}` · pixels {'on' if model.cfg.use_pixels else 'off'}")
@@ -91,7 +95,9 @@ with st.sidebar:
         st.json(model.metrics)
 
     st.divider()
-    src = st.radio("Input", ["Dataset star", "Upload file", "MAST lookup"])
+    has_dataset = os.path.isdir(CFG.dataset_root)
+    sources = (["Dataset star"] if has_dataset else []) + ["Upload file", "MAST lookup"]
+    src = st.radio("Input", sources)
     curve = None
     if src == "Dataset star":
         folders = sorted(d for d in os.listdir(CFG.dataset_root)

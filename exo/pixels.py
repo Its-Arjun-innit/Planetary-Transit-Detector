@@ -22,7 +22,7 @@ import numpy as np, pandas as pd
 
 from .config import ExoConfig
 
-PIX_DIR = r"D:\Codes\ISRO_Hackathon\exo\pixels"
+PIX_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "pixels")
 PIX_INDEX = os.path.join(PIX_DIR, "_index.csv")
 PIX_OUT   = os.path.join(PIX_DIR, "pixel_features.csv")
 STELLAR_CACHE = os.path.join(PIX_DIR, "_stellar.csv")
