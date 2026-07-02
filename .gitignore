@@ -12,3 +12,7 @@ transit_lightcurves.xlsx
 __pycache__/
 *.pyc
 .ipynb_checkpoints/
+
+# Session/runtime
+.claude/
+exo/_train.log
