@@ -17,7 +17,13 @@ _ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))    # project
 DIP_FEATURES  = ["depth_ppm", "duration_hr", "odd_even_diff", "odd_even_sig",
                  "secondary_depth", "secondary_snr", "trap_shape", "ingress_frac",
                  "snr", "sde"]
-SPOT_FEATURES = ["ls_power", "acf_peak", "rot_amplitude"]
+SPOT_FEATURES = ["ls_power", "acf_peak", "rot_amplitude", "ls_harmonic", "acf_2p_ratio"]
+# folded shape vectors: the dip's actual shape (depth-normalized binned fold), local view
+# around the dip + global view of the whole phase. Dip heads only — NOT in the OOD gate
+# (48 extra dims would wreck a per-folder Mahalanobis fit on ~250 rows).
+N_LOCAL, N_GLOBAL = 24, 24
+SHAPE_FEATURES = [f"lv_{i:02d}" for i in range(N_LOCAL)] + \
+                 [f"gv_{i:02d}" for i in range(N_GLOBAL)]
 # pixel-channel features (built by pixels.py from TPFs). Only used when cfg.use_pixels.
 PIXEL_FEATURES = ["centroid_shift", "rho_consistency", "contratio"]
 ALL_FEATURES  = DIP_FEATURES + SPOT_FEATURES   # light-curve-only default (use *_features(cfg) below)
@@ -96,12 +102,12 @@ class ExoConfig:
 
 
 def dip_features(cfg: "ExoConfig") -> list:
-    """Transit/EB head features — light-curve dip features, plus pixel features if enabled."""
-    return DIP_FEATURES + (PIXEL_FEATURES if cfg.use_pixels else [])
+    """Transit/EB head features — dip scalars + folded shape vector, plus pixels if enabled."""
+    return DIP_FEATURES + SHAPE_FEATURES + (PIXEL_FEATURES if cfg.use_pixels else [])
 
 def all_features(cfg: "ExoConfig") -> list:
-    """Full feature vector the OOD gate scores over."""
-    return dip_features(cfg) + SPOT_FEATURES
+    """Scalar feature vector the OOD gate scores over (no shape bins — see SHAPE_FEATURES)."""
+    return DIP_FEATURES + (PIXEL_FEATURES if cfg.use_pixels else []) + SPOT_FEATURES
 
 
 def label_bits(folder: str) -> dict:

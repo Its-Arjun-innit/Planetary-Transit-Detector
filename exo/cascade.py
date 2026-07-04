@@ -20,7 +20,7 @@ from sklearn.metrics import average_precision_score, recall_score, brier_score_l
 import joblib
 
 from .config import (ExoConfig, DIP_FEATURES, SPOT_FEATURES, HEAVY_FEATURES,
-                     dip_features, all_features)
+                     SHAPE_FEATURES, dip_features, all_features)
 
 HEADS = {                                   # head -> (feature group, threshold attr)
     "is_transit":  ("dip",  "thr_transit"),
@@ -300,6 +300,9 @@ if __name__ == "__main__":
             ls_power=rng.normal(0.9 if R else 0.1, .03),              # rotation -> LS power
             acf_peak=rng.normal(0.9 if R else 0.1, .03),
             rot_amplitude=rng.normal(0.02 if R else 0.002, .001),
+            ls_harmonic=rng.normal(0.5 if R else 0.05, .05),
+            acf_2p_ratio=rng.normal(0.8 if R else 0.1, .05),
+            **{c: rng.normal(0.5, .1) for c in SHAPE_FEATURES},
             folder=folder, kic=i,
             **{"is_transit": int(T), "is_EB": int(E), "is_rotating": int(R)}))
     t = pd.DataFrame(rows)

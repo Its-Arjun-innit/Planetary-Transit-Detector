@@ -1,7 +1,9 @@
 # Data & model artifacts (large, regenerable — not source)
 dataset/
+# curated, versioned checkpoints kept in-repo (see README); all other models regenerable
 exo/models/*.joblib
 !exo/models/latest.joblib
+!exo/models/cascade_v*.joblib
 exo/pixels/
 exo/features_real*.csv
 exo/predictions.jsonl

@@ -62,6 +62,19 @@ The trained model lives at `exo/models/latest.joblib`. Every prediction the syst
 CLI or UI — is appended to `exo/predictions.jsonl` with the exact model version, config
 fingerprint, and inputs, so any two runs can be compared fairly.
 
+### Shipped checkpoints
+
+Three curated models ship with the repo so the UI dropdown offers a real before/after
+comparison. `latest.joblib` is a copy of the newest (v3).
+
+| file | channel | features | notes |
+| --- | --- | --- | --- |
+| `cascade_v1_lightcurve-only.joblib` | flux only | 10 dip + 3 spot | no TPF download needed; runs anywhere |
+| `cascade_v2_pixel-hp-baseline.joblib` | + pixel centroid | + HP search | the method-5 deployed baseline |
+| `cascade_v3_shape-vectors.joblib` | + pixel centroid | + folded shape vectors, eccentric secondary, rotation harmonics | **current** — EB PR-AUC 0.814→0.835, rotating 0.642→0.653 (8-seed) |
+
+Other historical checkpoints are regenerable and left gitignored.
+
 ---
 
 ## The Streamlit UI — user guide

@@ -15,24 +15,46 @@ import numpy as np
 import pandas as pd
 from astropy.timeseries import BoxLeastSquares, LombScargle
 
-from .config import ExoConfig, DIP_FEATURES, SPOT_FEATURES, ALL_FEATURES, label_bits
+from .config import (ExoConfig, DIP_FEATURES, SPOT_FEATURES, ALL_FEATURES,
+                     N_LOCAL, N_GLOBAL, label_bits)
 
 warnings.filterwarnings("ignore")
+
+
+def _acf(time, flux):
+    """Normalized autocorrelation + the sampling step (days per lag)."""
+    f = flux - np.mean(flux)
+    acf = np.correlate(f, f, mode="full")[len(f) - 1:]
+    if acf[0] == 0:
+        return None, np.nan
+    dt = np.median(np.diff(time))
+    return acf / acf[0], dt
 
 
 def _acf_peak(time, flux, cfg: ExoConfig) -> float:
     """Height of the strongest autocorrelation peak in the rotation-lag window.
     This is the feature most aligned with the labels: McQuillan+2014 (a main rotation
     catalog) measured rotation by ACF, so the rotation folders are ~ACF-selected."""
-    f = flux - np.mean(flux)
-    acf = np.correlate(f, f, mode="full")[len(f) - 1:]
-    if acf[0] == 0:
+    acf, dt = _acf(time, flux)
+    if acf is None:
         return 0.0
-    acf = acf / acf[0]
-    dt = np.median(np.diff(time))                      # days per sample
     lo = max(1, int(cfg.rot_period_min / dt))
     hi = min(len(acf) - 1, int(cfg.rot_period_max / dt))
     return float(np.max(acf[lo:hi])) if hi > lo else 0.0
+
+
+def _binned_median(x, y, lo, hi, n, min_pts=2):
+    """Median of y in n equal bins of x over [lo, hi]; NaN where a bin has < min_pts."""
+    edges = np.linspace(lo, hi, n + 1)
+    idx = np.digitize(x, edges) - 1
+    out = np.full(n, np.nan)
+    cnt = np.zeros(n, int)
+    for b in range(n):
+        m = idx == b
+        cnt[b] = m.sum()
+        if cnt[b] >= min_pts:
+            out[b] = np.median(y[m])
+    return out, cnt
 
 
 def _bls_dip(time, flux, cfg: ExoConfig) -> dict:
@@ -62,12 +84,18 @@ def _bls_dip(time, flux, cfg: ExoConfig) -> dict:
         se = np.sqrt(np.var(odd) / len(odd) + np.var(even) / len(even))
         oe_sig = float(abs(np.median(odd) - np.median(even)) / se) if se > 0 else 0.0
 
-    sec = flux[(ph > 0.5 - half) & (ph < 0.5 + half)]
-    sec_depth = float(max(0.0, (1 - np.median(sec)) * 1e6)) if len(sec) else 0.0
-    # secondary_snr: secondary-eclipse depth in units of the out-of-eclipse noise. A real secondary
-    # (EB) stands above the noise; a depth value alone can't tell a true secondary from scatter.
-    sec_snr = float((1 - np.median(sec)) / (sigma / np.sqrt(max(1, len(sec))))) \
-        if len(sec) and sigma > 0 else 0.0
+    # secondary eclipse: strongest out-of-primary dip ANYWHERE in phase, not just 0.5 —
+    # eccentric EBs park the secondary off-center, the fixed-0.5 window missed them.
+    phs = (ph + 0.5) % 1.0                                   # primary parked at 0.5
+    gmed, gcnt = _binned_median(phs, flux, 0.0, 1.0, N_GLOBAL)
+    oop = np.abs(np.arange(N_GLOBAL) / N_GLOBAL + 0.5 / N_GLOBAL - 0.5) > 2 * dur / P
+    sec_depth, sec_snr = 0.0, 0.0
+    cand = np.where(oop & np.isfinite(gmed))[0]
+    if len(cand) and sigma > 0:
+        b = cand[int(np.argmin(gmed[cand]))]
+        d_sec = 1 - gmed[b]
+        sec_depth = float(max(0.0, d_sec * 1e6))
+        sec_snr = float(d_sec / (sigma / np.sqrt(max(1, gcnt[b]))))
 
     # trap_shape: 0 = flat-bottomed box (planet/U), ->1 = pointy (grazing EB/V).
     # ponytail: proxy = how much shallower the median in-transit point is than the deepest.
@@ -86,10 +114,25 @@ def _bls_dip(time, flux, cfg: ExoConfig) -> dict:
         on_floor = (1 - intr) >= 0.75 * dmin
         ingress_frac = float(1 - on_floor.sum() / len(intr))
 
+    # folded shape vectors, depth-normalized ((1-flux)/depth: ~1 on the dip floor, ~0 out).
+    # The model sees the actual dip shape instead of the trap_shape/ingress_frac proxies.
+    shape = {}
+    w = min(0.49, 2.5 * dur / P)                             # local window: ±2.5 durations
+    if depth > 0:
+        near = (phs > 0.5 - w) & (phs < 0.5 + w)
+        lmed, _ = _binned_median(phs[near], flux[near], 0.5 - w, 0.5 + w, N_LOCAL)
+        for i in range(N_LOCAL):
+            shape[f"lv_{i:02d}"] = float((1 - lmed[i]) / depth) if np.isfinite(lmed[i]) else np.nan
+        for i in range(N_GLOBAL):
+            shape[f"gv_{i:02d}"] = float((1 - gmed[i]) / depth) if np.isfinite(gmed[i]) else np.nan
+    else:
+        shape = {f"lv_{i:02d}": np.nan for i in range(N_LOCAL)}
+        shape.update({f"gv_{i:02d}": np.nan for i in range(N_GLOBAL)})
+
     return dict(depth_ppm=depth * 1e6, duration_hr=dur * 24, odd_even_diff=odd_even,
                 odd_even_sig=oe_sig, secondary_depth=sec_depth, secondary_snr=sec_snr,
                 trap_shape=trap, ingress_frac=ingress_frac, snr=snr, sde=sde,
-                period=P, t0=t0, duration_d=dur)
+                period=P, t0=t0, duration_d=dur, **shape)
 
 
 def extract_features(time, flux, cfg: ExoConfig = None, eclipse_mask=None) -> dict:
@@ -107,19 +150,31 @@ def extract_features(time, flux, cfg: ExoConfig = None, eclipse_mask=None) -> di
     flux = flux / np.median(flux)                       # normalize (parquet is ~normalized already)
 
     # (1) rotation on the un-flattened curve
+    ls = LombScargle(time, flux)
     freq = np.linspace(1 / cfg.rot_period_max, 1 / cfg.rot_period_min, cfg.rot_n_freqs)
-    power = LombScargle(time, flux).power(freq)
+    power = ls.power(freq)
     j = int(np.argmax(power))
     P_rot, ls_power = float(1 / freq[j]), float(power[j])
     rot_amplitude = float(np.std(flux))
     acf_peak = _acf_peak(time, flux, cfg)
+    # spot-vs-other discriminators: power at the half-period harmonic (two spot groups ->
+    # strong P/2 signal) and ACF persistence at 2x the period (real rotation repeats; a
+    # one-off trend doesn't).
+    ls_harmonic = float(ls.power(np.array([2 / P_rot]))[0] / (ls_power + 1e-12))
+    acf_arr, dt = _acf(time, flux)
+    acf_2p_ratio = 0.0
+    if acf_arr is not None and np.isfinite(dt) and dt > 0:
+        i1, i2 = int(P_rot / dt), int(2 * P_rot / dt)
+        if 0 < i1 < len(acf_arr) and i2 < len(acf_arr):
+            acf_2p_ratio = float(acf_arr[i2] / (abs(acf_arr[i1]) + 1e-12))
 
     # (2) peel: flatten removes rotation/systematics before the dip search
     fl = _flatten(flux, cfg.flatten_window)
     dip = _bls_dip(time, fl, cfg)
 
     feat = {**dip, "ls_power": ls_power, "acf_peak": acf_peak,
-            "rot_amplitude": rot_amplitude, "P_rot": P_rot}
+            "rot_amplitude": rot_amplitude, "ls_harmonic": ls_harmonic,
+            "acf_2p_ratio": acf_2p_ratio, "P_rot": P_rot}
     return feat
 
 
