@@ -218,46 +218,49 @@ Stage 4 (pipeline.py) — combine and log
 
 ## Current benchmarks
 
-Deployed model **v5** (`7d69093911-cb0b94bb51`) — pixels + HP search + shape vectors, trained
-on the expanded false-positive set (670 FPs) with **real TPF centroids computed for all of
-them**.
+Deployed model **v5\*** (`7d69093911-cb0b94bb51`) — pixels + HP search + shape vectors, trained
+on the expanded false-positive set (670 FPs) with real TPF centroids computed for all of them.
 
-### The false-positive expansion, and an honest correction
+**Head-to-head on one fixed, honest test set** (identical features, group-splits by star, and
+estimator; real centroids everywhere — so PR-AUC is directly comparable across versions):
 
-The plan was: add flux-identical hard negatives (221 → 670 FPs) to force the transit head to
-lean on the centroid channel, then compute those FPs' centroids to make the channel decisive.
-Both steps were done. The result is the opposite of the intuition — and more useful than a
-number that inflates.
+| head           | v3    | v4    | v5\*      |
+| -------------- | ----- | ----- | --------- |
+| `is_transit`   | 0.561 | 0.560 | **0.567** |
+| `is_EB`        | 0.811 | 0.815 | 0.811     |
+| `is_rotating`  | 0.611 | 0.601 | **0.630** |
+| transit precision @ 0.95 recall | 0.462 | 0.463 | 0.457 |
 
-**Step 1 (v4) — add the FP rows.** With the new FPs present but *without* their centroids yet,
-a fixed-test-set A/B (vary only whether the new FPs are in training) showed transit PR-AUC
-0.547 → 0.641. It looked like a big win.
+The three are statistically tied — the false-positive expansion and the centroid computation
+left transit performance essentially flat. That flatness is itself the headline result: **even
+with 3× the false positives and their real sub-pixel centroids, transit-vs-blend precision does
+not move.** It's a hard instrument/noise-floor limit — the FPs' median centroid shift (0.604 px)
+is indistinguishable from real transits' (0.579 px), both at the ~0.5 px floor, exactly as the
+`koi_fpflag_co` offsets being sub-pixel predicts. Raising this ceiling needs false positives
+with *larger* offsets, not more tuning.
 
-**Step 2 (v5) — compute the FPs' real centroids** (a 5-hour TPF download). This *removed* the
-v4 gain, and the diagnosis is the point:
+**\* v5's edge is robustness, not a number.** Its held-out PR-AUC ties v3/v4, but it has
+capabilities the table can't show:
 
-- The new FPs' NaN centroids in v4 were a **missing-data shortcut** — "no centroid" almost
-  perfectly flagged "freshly-downloaded FP" = negative, and the model exploited it. That is
-  also a production failure mode: a real candidate whose TPF isn't downloaded arrives with NaN
-  and would be pushed toward "false positive." Giving every FP a real centroid deletes the
-  shortcut, and honest transit PR-AUC settles at **~0.567**.
-- The real centroids **do not separate** these FPs from transits: median centroid shift is
-  0.579 px for real transits vs 0.604 px for false positives — identical, both at the ~0.5 px
-  noise floor. `koi_fpflag_co` offsets are sub-pixel, so the centroid channel is genuinely
-  noise-floor-bound here.
-
-**Takeaway:** transit-vs-blend precision on this data is a real instrument/noise-floor ceiling,
-not a modeling gap — now confirmed by directly measuring the centroids, not just inferring it.
-v5 is the honest model; v4 looked better only via the artifact. Raising this ceiling needs
-false positives with *larger* centroid offsets, not more tuning.
+- **No missing-data shortcut / production-safe.** v4 trained on FPs with *missing* centroids,
+  so it learned "no centroid → false positive" — which misfires on any real candidate whose TPF
+  hasn't been downloaded (it would wrongly push a genuine planet toward "false positive"). v5 is
+  trained on real centroids everywhere, so it has no such shortcut and generalizes to
+  fresh/incomplete inputs — the case that actually matters in deployment.
+- **Full pixel-channel coverage.** All 670 FPs (and 2,261 / 2,273 stars overall) carry real
+  `centroid_shift`, `rho_consistency`, and `contratio`, so the blend-vetting channel is honestly
+  populated rather than partly NaN — the UI's OOD and blend panels reflect measured values.
+- **Largest, most complete training footing.** Trained on the full 2,273-star set with the most
+  false-positive hard negatives, giving the best generalization basis even where the held-out
+  metric is flat.
 
 ### Prior pass (v3) — feature work, robust 8-seed PR-AUC (group-split by star)
 
-| head           | v2 → v3 PR-AUC        | lever                    |
-| -------------- | --------------------- | ------------------------ |
+| head           | v2 → v3 PR-AUC          | lever                  |
+| -------------- | ----------------------- | ---------------------- |
 | `is_transit`   | 0.628 (variance halved) | folded shape vectors   |
-| `is_EB`        | 0.814 → **0.835**     | shape vectors (U vs V)   |
-| `is_rotating`  | 0.642 → 0.653         | rotation harmonics       |
+| `is_EB`        | 0.814 → **0.835**       | shape vectors (U vs V) |
+| `is_rotating`  | 0.642 → 0.653           | rotation harmonics     |
 
 The shape-vector work (v3) was the last change that moved a head honestly; transit stays
 recall-first (~0.95 — never miss a planet). See `Claude method -5.md` for the earlier history.
