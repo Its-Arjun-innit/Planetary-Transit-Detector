@@ -64,15 +64,16 @@ fingerprint, and inputs, so any two runs can be compared fairly.
 
 ### Shipped checkpoints
 
-Four curated models ship with the repo so the UI dropdown offers a real before/after
-comparison. `latest.joblib` is a copy of the newest (v4).
+Five curated models ship with the repo so the UI dropdown offers a real before/after
+comparison. `latest.joblib` is a copy of the newest (v5).
 
 | file | channel | features / data | notes |
 | --- | --- | --- | --- |
 | `cascade_v1_lightcurve-only.joblib` | flux only | 10 dip + 3 spot | no TPF download needed; runs anywhere |
 | `cascade_v2_pixel-hp-baseline.joblib` | + pixel centroid | + HP search | the method-5 deployed baseline |
 | `cascade_v3_shape-vectors.joblib` | + pixel centroid | + folded shape vectors, eccentric secondary, rotation harmonics | EB PR-AUC 0.814→0.835, rotating 0.642→0.653 (8-seed) |
-| `cascade_v4_more-falsepos.joblib` | + pixel centroid | 670 false positives (was 221) | **current** — transit precision@0.95-recall 0.43→0.55 on a fixed test set |
+| `cascade_v4_more-falsepos.joblib` | + pixel centroid | 670 false positives (was 221) | transit gain later found partly artifactual — see benchmarks |
+| `cascade_v5_honest-centroids.joblib` | + pixel centroid | + real centroids for all 670 FPs | **current** — honest full-coverage model; no missing-data shortcut |
 
 Other historical checkpoints are regenerable and left gitignored.
 
@@ -217,25 +218,40 @@ Stage 4 (pipeline.py) — combine and log
 
 ## Current benchmarks
 
-Deployed model **v4** (`2d2734ed58-cb0b94bb51`) — pixels + HP search + shape vectors, trained
-on the expanded false-positive set (670 FPs, up from 221).
+Deployed model **v5** (`7d69093911-cb0b94bb51`) — pixels + HP search + shape vectors, trained
+on the expanded false-positive set (670 FPs) with **real TPF centroids computed for all of
+them**.
 
-**The v4 change — more false positives.** Adding 449 flux-identical hard negatives directly
-attacks the transit head's known weakness. Measured on a **fixed test set** (varying only
-whether the new FPs are in *training*, so the base rate is identical and PR-AUC is comparable):
+### The false-positive expansion, and an honest correction
 
-| head           | trained without new FPs | trained with them (v4) | delta   |
-| -------------- | ----------------------- | ---------------------- | ------- |
-| `is_transit`   | 0.547 PR-AUC            | **0.641 PR-AUC**       | +0.094  |
-| `is_EB`        | 0.811                   | 0.838                  | +0.027  |
-| `is_rotating`  | 0.546                   | 0.541                  | −0.005  |
+The plan was: add flux-identical hard negatives (221 → 670 FPs) to force the transit head to
+lean on the centroid channel, then compute those FPs' centroids to make the channel decisive.
+Both steps were done. The result is the opposite of the intuition — and more useful than a
+number that inflates.
 
-Transit **precision at 0.95 recall rose 0.43 → 0.55 (+0.12)** on that shared test set — the
-biggest single-pass gain on the weakest head. (Note: because v4's own held-out set now
-contains many more negatives, its *raw* single-split PR-AUC reads lower than v3's — a base-rate
-artifact, not a regression. The fixed-test-set numbers above are the honest comparison.)
+**Step 1 (v4) — add the FP rows.** With the new FPs present but *without* their centroids yet,
+a fixed-test-set A/B (vary only whether the new FPs are in training) showed transit PR-AUC
+0.547 → 0.641. It looked like a big win.
 
-**Prior pass (v3) — feature work, robust 8-seed PR-AUC** (group-split by star):
+**Step 2 (v5) — compute the FPs' real centroids** (a 5-hour TPF download). This *removed* the
+v4 gain, and the diagnosis is the point:
+
+- The new FPs' NaN centroids in v4 were a **missing-data shortcut** — "no centroid" almost
+  perfectly flagged "freshly-downloaded FP" = negative, and the model exploited it. That is
+  also a production failure mode: a real candidate whose TPF isn't downloaded arrives with NaN
+  and would be pushed toward "false positive." Giving every FP a real centroid deletes the
+  shortcut, and honest transit PR-AUC settles at **~0.567**.
+- The real centroids **do not separate** these FPs from transits: median centroid shift is
+  0.579 px for real transits vs 0.604 px for false positives — identical, both at the ~0.5 px
+  noise floor. `koi_fpflag_co` offsets are sub-pixel, so the centroid channel is genuinely
+  noise-floor-bound here.
+
+**Takeaway:** transit-vs-blend precision on this data is a real instrument/noise-floor ceiling,
+not a modeling gap — now confirmed by directly measuring the centroids, not just inferring it.
+v5 is the honest model; v4 looked better only via the artifact. Raising this ceiling needs
+false positives with *larger* centroid offsets, not more tuning.
+
+### Prior pass (v3) — feature work, robust 8-seed PR-AUC (group-split by star)
 
 | head           | v2 → v3 PR-AUC        | lever                    |
 | -------------- | --------------------- | ------------------------ |
@@ -243,13 +259,11 @@ artifact, not a regression. The fixed-test-set numbers above are the honest comp
 | `is_EB`        | 0.814 → **0.835**     | shape vectors (U vs V)   |
 | `is_rotating`  | 0.642 → 0.653         | rotation harmonics       |
 
-Transit stays recall-first (~0.95 — never miss a planet). The remaining precision ceiling is
-centroid-bound: the new FPs still need their TPF centroid features computed
-(`python -m exo.pixels build`, resumable) to unlock the pixel channel's full lift on them.
-See `Claude method -5.md` for the earlier history.
+The shape-vector work (v3) was the last change that moved a head honestly; transit stays
+recall-first (~0.95 — never miss a planet). See `Claude method -5.md` for the earlier history.
 
 Dataset: 2,273 stars (one row per KIC, deduped) across 7 folders, including 670
-centroid-offset false positives.
+centroid-offset false positives, all with computed TPF centroids.
 
 ---
 
