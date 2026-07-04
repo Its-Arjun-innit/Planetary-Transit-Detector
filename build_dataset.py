@@ -205,37 +205,68 @@ def topup():
 
 
 # ---------------- Phase 4: false-positive / blend class (centroid-offset KOIs) ----------------
+FP_CAP = 700   # FalsePositive hard-negatives lift precision on EVERY head; own cap, > MAX_PER_CLASS
+
+
 def falsepos():
-    """Download a 7th 'FalsePositive' folder: KOIs dispositioned FALSE POSITIVE with the
+    """Download the 'FalsePositive' folder: KOIs dispositioned FALSE POSITIVE with the
     centroid-offset flag (koi_fpflag_co=1) — the signal comes from a *different* star in the
     aperture (background-EB blend). These are transit-LOOKING hard negatives whose only real
     tell is centroid motion, so they're what makes the pixel channel decisive (handoff §8.1).
-    Folder name has no Transit/EB/Starspot substring -> label_bits() = all-zeros automatically."""
+    Folder name has no Transit/EB/Starspot substring -> label_bits() = all-zeros automatically.
+
+    Expandable + resumable: each run skips KICs already saved or already attempted (recorded in
+    _index_fp.csv) and pulls FRESH ones from the ~1.8k available pool, up to FP_CAP saved. Rerun
+    (ideally in a plain terminal for a long pass) until it reports the target reached."""
     from concurrent.futures import ThreadPoolExecutor, as_completed
     folder = "FalsePositive"
+    idx_path = os.path.join(ROOT, "_index_fp.csv")
     print("Phase 4: fetching FALSE POSITIVE KOIs with centroid offset (koi_fpflag_co=1)...")
     url = ("https://exoplanetarchive.ipac.caltech.edu/TAP/sync?query="
            "select+distinct+kepid+from+cumulative+where+koi_disposition='FALSE+POSITIVE'"
            "+and+koi_fpflag_co=1&format=csv")
-    kics = sorted(set(pd.read_csv(url)["kepid"].astype(int)))
-    rng = np.random.default_rng(42)
-    if len(kics) > MAX_PER_CLASS:
-        kics = sorted(rng.choice(kics, MAX_PER_CLASS, replace=False))
-    print(f"  {len(kics)} KICs to download -> {os.path.join(ROOT, folder)}")
+    avail = sorted(set(pd.read_csv(url)["kepid"].astype(int)))
 
-    _say(f"\nPhase 4: downloading {len(kics)} {folder} curves, {WORKERS} workers, resumable...")
-    log, t0 = [], time.time()
+    saved = _saved(folder)                                    # parquets already on disk
+    prev = pd.read_csv(idx_path) if os.path.exists(idx_path) else \
+        pd.DataFrame(columns=["kic", "folder", "status"])
+    tried = set(prev["kic"].astype(int))                     # attempted before (landed OR permanent no-data)
+    need = FP_CAP - len(saved)
+    if need <= 0:
+        print(f"  {len(saved)} FP already saved (cap {FP_CAP}) — nothing to do."); return
+
+    candidates = [k for k in avail if k not in saved and k not in tried]
+    rng = np.random.default_rng(42)
+    if len(candidates) > need * 2:                            # ~60% land -> attempt ~2x the shortfall
+        candidates = sorted(rng.choice(candidates, need * 2, replace=False).tolist())
+    print(f"  {len(saved)} saved, target {FP_CAP}; attempting {len(candidates)} fresh KICs "
+          f"({len(avail)} available, {len(tried)} previously tried)")
+
+    _say(f"\nPhase 4: {len(candidates)} fresh {folder} attempts, target {FP_CAP}, resumable...")
+    log, t0, got = [], time.time(), 0
+
+    def _flush():
+        pd.concat([prev, pd.DataFrame(log)]).drop_duplicates("kic", keep="last") \
+          .to_csv(idx_path, index=False)
+
     with ThreadPoolExecutor(max_workers=WORKERS) as ex:
-        futs = {ex.submit(_one, int(k), folder): k for k in kics}
+        futs = {ex.submit(_one, int(k), folder): k for k in candidates}
         for i, fut in enumerate(as_completed(futs), 1):
             kic, _, status = fut.result()
             log.append({"kic": kic, "folder": folder, "status": status})
+            if status.startswith("ok") or status == "cached":
+                got += 1
             if i % 20 == 0 or "ok" in status:
-                _say(f"  [{i:4d}/{len(kics)}] KIC{kic} {status}  ({time.time()-t0:.0f}s)")
-    pd.DataFrame(log).to_csv(os.path.join(ROOT, "_index_fp.csv"), index=False)
-    n_ok = sum("ok" in l["status"] or l["status"] == "cached" for l in log)
-    _say(f"\ndone. {n_ok}/{len(kics)} {folder} curves saved")
-    print(f"  {n_ok}/{len(kics)} saved.")
+                _say(f"  [{i:4d}/{len(candidates)}] KIC{kic} {status}  ({time.time()-t0:.0f}s)")
+            if i % 25 == 0:
+                _flush()
+            if len(saved) + got >= FP_CAP:                    # target reached — stop consuming results
+                break
+    _flush()
+    total = len(_saved(folder))
+    _say(f"\ndone. {total} {folder} curves saved (target {FP_CAP})")   # _say is teardown-proof;
+    # no trailing print() — a bare print on a closed stdout (backgrounded run) raises and would
+    # crash us after the work is done (handoff §2 / §6.5). The log line above is the record.
 
 
 if __name__ == "__main__":

@@ -64,14 +64,15 @@ fingerprint, and inputs, so any two runs can be compared fairly.
 
 ### Shipped checkpoints
 
-Three curated models ship with the repo so the UI dropdown offers a real before/after
-comparison. `latest.joblib` is a copy of the newest (v3).
+Four curated models ship with the repo so the UI dropdown offers a real before/after
+comparison. `latest.joblib` is a copy of the newest (v4).
 
-| file | channel | features | notes |
+| file | channel | features / data | notes |
 | --- | --- | --- | --- |
 | `cascade_v1_lightcurve-only.joblib` | flux only | 10 dip + 3 spot | no TPF download needed; runs anywhere |
 | `cascade_v2_pixel-hp-baseline.joblib` | + pixel centroid | + HP search | the method-5 deployed baseline |
-| `cascade_v3_shape-vectors.joblib` | + pixel centroid | + folded shape vectors, eccentric secondary, rotation harmonics | **current** — EB PR-AUC 0.814→0.835, rotating 0.642→0.653 (8-seed) |
+| `cascade_v3_shape-vectors.joblib` | + pixel centroid | + folded shape vectors, eccentric secondary, rotation harmonics | EB PR-AUC 0.814→0.835, rotating 0.642→0.653 (8-seed) |
+| `cascade_v4_more-falsepos.joblib` | + pixel centroid | 670 false positives (was 221) | **current** — transit precision@0.95-recall 0.43→0.55 on a fixed test set |
 
 Other historical checkpoints are regenerable and left gitignored.
 
@@ -216,32 +217,38 @@ Stage 4 (pipeline.py) — combine and log
 
 ## Current benchmarks
 
-Deployed model **v3** (`ad51d3a0e1-c340f02a47`) — pixels + HP search + folded shape vectors.
+Deployed model **v4** (`2d2734ed58-cb0b94bb51`) — pixels + HP search + shape vectors, trained
+on the expanded false-positive set (670 FPs, up from 221).
 
-**Robust 8-seed PR-AUC** (group-split by star; a star never appears in both train and test):
+**The v4 change — more false positives.** Adding 449 flux-identical hard negatives directly
+attacks the transit head's known weakness. Measured on a **fixed test set** (varying only
+whether the new FPs are in *training*, so the base rate is identical and PR-AUC is comparable):
 
-| head           | PR-AUC (mean ± std) | vs v2 baseline                         |
-| -------------- | ------------------- | -------------------------------------- |
-| `is_transit`   | 0.628 ± 0.018       | flat (variance halved from ±0.031)     |
-| `is_EB`        | **0.835 ± 0.012**   | +0.021 (shape vector)                  |
-| `is_rotating`  | 0.653 ± 0.023       | +0.011 (rotation harmonics)            |
+| head           | trained without new FPs | trained with them (v4) | delta   |
+| -------------- | ----------------------- | ---------------------- | ------- |
+| `is_transit`   | 0.547 PR-AUC            | **0.641 PR-AUC**       | +0.094  |
+| `is_EB`        | 0.811                   | 0.838                  | +0.027  |
+| `is_rotating`  | 0.546                   | 0.541                  | −0.005  |
 
-**At the deployed thresholds** (the app's operating point):
+Transit **precision at 0.95 recall rose 0.43 → 0.55 (+0.12)** on that shared test set — the
+biggest single-pass gain on the weakest head. (Note: because v4's own held-out set now
+contains many more negatives, its *raw* single-split PR-AUC reads lower than v3's — a base-rate
+artifact, not a regression. The fixed-test-set numbers above are the honest comparison.)
 
-| head           | threshold | PR-AUC | recall | precision | Brier |
-| -------------- | --------- | ------ | ------ | --------- | ----- |
-| `is_transit`   | 0.393     | 0.640  | 0.953  | 0.558     | 0.194 |
-| `is_EB`        | 0.377     | 0.851  | 0.712  | **0.904** | 0.092 |
-| `is_rotating`  | 0.279     | 0.690  | 0.929  | 0.606     | 0.194 |
+**Prior pass (v3) — feature work, robust 8-seed PR-AUC** (group-split by star):
 
-Transit is deliberately recall-first (~0.95 — never miss a planet); its ~0.56 precision is
-centroid-bound, not flux-bound (three independent runs confirm flux features can't move it).
-EB is the strongest head, and the shape vector was this pass's biggest win (separates
-U-shaped transits from V-shaped grazing eclipses directly). See `Claude method -5.md` for the
-earlier history — what worked (flux vetting features, HP search) and what didn't
-(multi-quarter centroid was an honest no-op).
+| head           | v2 → v3 PR-AUC        | lever                    |
+| -------------- | --------------------- | ------------------------ |
+| `is_transit`   | 0.628 (variance halved) | folded shape vectors   |
+| `is_EB`        | 0.814 → **0.835**     | shape vectors (U vs V)   |
+| `is_rotating`  | 0.642 → 0.653         | rotation harmonics       |
 
-Dataset: 1,839 stars (one row per KIC, deduped) across 7 folders, including 218
+Transit stays recall-first (~0.95 — never miss a planet). The remaining precision ceiling is
+centroid-bound: the new FPs still need their TPF centroid features computed
+(`python -m exo.pixels build`, resumable) to unlock the pixel channel's full lift on them.
+See `Claude method -5.md` for the earlier history.
+
+Dataset: 2,273 stars (one row per KIC, deduped) across 7 folders, including 670
 centroid-offset false positives.
 
 ---
