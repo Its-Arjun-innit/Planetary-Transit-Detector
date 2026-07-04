@@ -216,18 +216,33 @@ Stage 4 (pipeline.py) — combine and log
 
 ## Current benchmarks
 
-Measured on 8 group-splits (a star never appears in both train and test):
+Deployed model **v3** (`ad51d3a0e1-c340f02a47`) — pixels + HP search + folded shape vectors.
 
-| head           | PR-AUC (mean ± std) | best F1        | notes                                    |
-| -------------- | ------------------- | -------------- | ---------------------------------------- |
-| `is_transit`   | 0.636 ± 0.033       | 0.690 ± 0.014  | recall-first threshold (~0.95)           |
-| `is_EB`        | 0.816 ± 0.024       | 0.766 ± 0.021  | flux features (odd-even sig, sec-SNR) win |
-| `is_rotating`  | 0.688 ± 0.026       | 0.745 ± 0.012  | HP search gave +0.06 PR-AUC              |
+**Robust 8-seed PR-AUC** (group-split by star; a star never appears in both train and test):
 
-At the deployed thresholds (transit 0.37, EB 0.34, rotating 0.33): transit ~0.95 recall,
-EB ~0.90 precision, rotating ~0.90 recall. See `Claude method -5.md` for the full history of
-what worked (flux vetting features, HP search) and what didn't (multi-quarter centroid was
-an honest no-op).
+| head           | PR-AUC (mean ± std) | vs v2 baseline                         |
+| -------------- | ------------------- | -------------------------------------- |
+| `is_transit`   | 0.628 ± 0.018       | flat (variance halved from ±0.031)     |
+| `is_EB`        | **0.835 ± 0.012**   | +0.021 (shape vector)                  |
+| `is_rotating`  | 0.653 ± 0.023       | +0.011 (rotation harmonics)            |
+
+**At the deployed thresholds** (the app's operating point):
+
+| head           | threshold | PR-AUC | recall | precision | Brier |
+| -------------- | --------- | ------ | ------ | --------- | ----- |
+| `is_transit`   | 0.393     | 0.640  | 0.953  | 0.558     | 0.194 |
+| `is_EB`        | 0.377     | 0.851  | 0.712  | **0.904** | 0.092 |
+| `is_rotating`  | 0.279     | 0.690  | 0.929  | 0.606     | 0.194 |
+
+Transit is deliberately recall-first (~0.95 — never miss a planet); its ~0.56 precision is
+centroid-bound, not flux-bound (three independent runs confirm flux features can't move it).
+EB is the strongest head, and the shape vector was this pass's biggest win (separates
+U-shaped transits from V-shaped grazing eclipses directly). See `Claude method -5.md` for the
+earlier history — what worked (flux vetting features, HP search) and what didn't
+(multi-quarter centroid was an honest no-op).
+
+Dataset: 1,839 stars (one row per KIC, deduped) across 7 folders, including 218
+centroid-offset false positives.
 
 ---
 
